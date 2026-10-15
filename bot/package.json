@@ -1,0 +1,19 @@
+{
+  "name": "salvos-finest-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord Bot and synchronization API for Salvo's Finest Apex Custom Lobbies",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "cors": "^2.8.5",
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
