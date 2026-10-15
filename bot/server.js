@@ -11,7 +11,8 @@ const { createClient } = require("@supabase/supabase-js");
 
 const {
     syncTeamsWithDiscord,
-    clearAllTeamRoles
+    clearAllTeamRoles,
+    deleteAllTrackedTeamRoles
 } = require("./sync");
 
 const isProduction =
@@ -760,6 +761,52 @@ app.post(
             return res.status(500).json({
                 success: false,
                 error: "Failed to clear team roles."
+            });
+        }
+    }
+);
+
+/* =========================================================
+   DELETE TRACKED TEAM ROLES
+========================================================= */
+
+app.post(
+    "/api/delete-team-roles",
+    authenticateRequest,
+    rateLimit,
+    async (req, res) => {
+        try {
+            if (!client.isReady()) {
+                return res.status(503).json({
+                    success: false,
+                    error: "Discord bot is not connected."
+                });
+            }
+
+            const guild = client.guilds.cache.get(DISCORD_GUILD_ID);
+
+            if (!guild) {
+                return res.status(503).json({
+                    success: false,
+                    error: "Configured Discord server was not found."
+                });
+            }
+
+            console.log(
+                `[API] Deleting tracked team roles in "${guild.name}" for ${req.authIdentity}.`
+            );
+
+            const result = await deleteAllTrackedTeamRoles(guild);
+            return res.json(result);
+        } catch (error) {
+            console.error(
+                "[API] Delete team roles error:",
+                error.message
+            );
+
+            return res.status(500).json({
+                success: false,
+                error: "Failed to delete tracked team roles."
             });
         }
     }

@@ -23,6 +23,14 @@ function normalizeIdentifier(str) {
  * @param {import('discord.js').Guild} guild
  * @returns {Map<string, import('discord.js').Role>} Map of normalized role name -> Role
  */
+const fs = require("node:fs");
+const path = require("node:path");
+
+const ROLE_REGISTRY_PATH = path.join(
+    __dirname,
+    "team-role-registry.json"
+);
+
 function getExistingTeamRoles(guild) {
     const teamRoleMap = new Map();
     const teamRolePattern = /^Team\s+(\d+)$/i;
@@ -38,6 +46,91 @@ function getExistingTeamRoles(guild) {
     return teamRoleMap;
 }
 
+function readRoleRegistry() {
+    try {
+        return JSON.parse(
+            fs.readFileSync(ROLE_REGISTRY_PATH, "utf8")
+        );
+    } catch (error) {
+        if (error.code === "ENOENT") {
+            return {};
+        }
+
+        throw error;
+    }
+}
+
+function writeRoleRegistry(registry) {
+    fs.writeFileSync(
+        ROLE_REGISTRY_PATH,
+        JSON.stringify(registry, null, 2),
+        { mode: 0o600 }
+    );
+}
+
+function getTrackedTeamRoleIds(guild, seedExisting = false) {
+    const registry = readRoleRegistry();
+
+    if (!Array.isArray(registry[guild.id])) {
+        // One-time migration: you confirmed existing team roles
+        // were created by this bot.
+        registry[guild.id] = seedExisting
+            ? [...getExistingTeamRoles(guild).values()]
+                .map(role => role.id)
+            : [];
+
+        writeRoleRegistry(registry);
+    }
+
+    return new Set(
+        registry[guild.id].filter(id =>
+            guild.roles.cache.has(id)
+        )
+    );
+}
+
+function registerTeamRole(guild, role) {
+    const registry = readRoleRegistry();
+
+    if (!Array.isArray(registry[guild.id])) {
+        registry[guild.id] = [];
+    }
+
+    if (!registry[guild.id].includes(role.id)) {
+        registry[guild.id].push(role.id);
+        writeRoleRegistry(registry);
+    }
+}
+
+function unregisterTeamRole(guild, roleId) {
+    const registry = readRoleRegistry();
+
+    if (!Array.isArray(registry[guild.id])) {
+        return;
+    }
+
+    registry[guild.id] =
+        registry[guild.id].filter(id => id !== roleId);
+
+    writeRoleRegistry(registry);
+}
+
+function getTrackedTeamRoles(guild) {
+    const trackedIds = getTrackedTeamRoleIds(guild, true);
+    const roles = new Map();
+
+    for (const roleId of trackedIds) {
+        const role = guild.roles.cache.get(roleId);
+        const match = role?.name.match(/^Team\s+(\d+)$/i);
+
+        if (role && match) {
+            roles.set(`team ${parseInt(match[1], 10)}`, role);
+        }
+    }
+
+    return roles;
+}
+
 /**
  * Ensures team roles exist for all generated teams up to totalTeams.
  * Reuses existing roles; creates missing roles sequentially.
@@ -50,7 +143,7 @@ async function ensureTeamRoles(guild, totalTeams) {
     // Refresh roles cache
     await guild.roles.fetch();
 
-    const existingTeamRoles = getExistingTeamRoles(guild);
+    const existingTeamRoles = getTrackedTeamRoles(guild);
     const roleMap = new Map();
     const created = [];
     const reused = [];
@@ -70,6 +163,8 @@ async function ensureTeamRoles(guild, totalTeams) {
                 mentionable: true,
                 reason: `Salvo's Finest Custom Lobby team role auto-creation (Team ${i})`
             });
+            registerTeamRole(guild, newRole);
+
             roleMap.set(i, newRole);
             created.push(newRole.name);
         }
@@ -217,8 +312,7 @@ async function syncTeamsWithDiscord(guild, teams) {
     const { roleMap, created, reused } = await ensureTeamRoles(guild, totalTeams);
 
     // Collect all team role IDs in the guild (both current and higher numbers if they exist)
-    const allGuildTeamRoles = getExistingTeamRoles(guild);
-    const allTeamRoleIds = new Set(Array.from(allGuildTeamRoles.values()).map(r => r.id));
+    const allTeamRoleIds = getTrackedTeamRoleIds(guild, true);
     for (const role of roleMap.values()) {
         allTeamRoleIds.add(role.id);
     }
@@ -323,8 +417,7 @@ async function clearAllTeamRoles(guild) {
     }
 
     await guild.roles.fetch();
-    const existingTeamRoles = getExistingTeamRoles(guild);
-    const teamRoleIds = new Set(Array.from(existingTeamRoles.values()).map(r => r.id));
+    const teamRoleIds = getTrackedTeamRoleIds(guild, true);
 
     if (teamRoleIds.size === 0) {
         return { success: true, clearedCount: 0, errors: [] };
@@ -359,11 +452,73 @@ async function clearAllTeamRoles(guild) {
     };
 }
 
+/**
+ * Deletes tracked bot-managed team roles after removing them
+ * from guild members.
+ */
+async function deleteAllTrackedTeamRoles(guild) {
+    if (!guild) {
+        throw new Error("Discord guild is not available.");
+    }
+
+    await guild.roles.fetch();
+
+    // The registry contains IDs verified as bot-managed.
+    const trackedRoleIds = getTrackedTeamRoleIds(guild, true);
+    const members = await guild.members.fetch();
+
+    let deletedCount = 0;
+    const errors = [];
+
+    for (const roleId of trackedRoleIds) {
+        const role = guild.roles.cache.get(roleId);
+
+        // Ignore IDs whose roles no longer exist.
+        if (!role) {
+            unregisterTeamRole(guild, roleId);
+            continue;
+        }
+
+        try {
+            // Remove the role from every member who has it.
+            for (const [, member] of members) {
+                if (member.roles.cache.has(roleId)) {
+                    await member.roles.remove(
+                        roleId,
+                        "Salvo's Finest admin deleted tracked team role"
+                    );
+                }
+            }
+
+            await role.delete(
+                "Salvo's Finest admin deleted tracked team role"
+            );
+
+            unregisterTeamRole(guild, roleId);
+            deletedCount++;
+        } catch (error) {
+            console.error(
+                `[Discord Bot] Failed to delete tracked role ${role.name} (${roleId}):`,
+                error.message
+            );
+
+            errors.push(`Failed to delete ${role.name}: ${error.message}`);
+        }
+    }
+
+    return {
+        success: errors.length === 0,
+        deletedCount,
+        errors
+    };
+}
+
 module.exports = {
     normalizeIdentifier,
     getExistingTeamRoles,
     ensureTeamRoles,
     matchMember,
     syncTeamsWithDiscord,
-    clearAllTeamRoles
+    clearAllTeamRoles,
+    deleteAllTrackedTeamRoles
 };
