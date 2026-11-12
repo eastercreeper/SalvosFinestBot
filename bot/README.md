@@ -1,6 +1,6 @@
 # Salvo's Finest Discord Bot & Role Synchronization Service
 
-This service automatically synchronizes Apex Custom Lobby teams generated on the website with your Discord server, managing team roles (`Team 1`, `Team 2`, `Team 3`, etc.) seamlessly and idempotently.
+This service automatically synchronizes Apex Custom Lobby teams generated on the website with your Discord server. It manages team roles, creates one private voice channel per team, and grants every team role read access to the configured shared text channel.
 
 ---
 
@@ -31,7 +31,7 @@ This service automatically synchronizes Apex Custom Lobby teams generated on the
 
 - **Zero Secret Exposure**: The Discord Bot Token and Supabase Service Role Key remain strictly inside backend environment variables. The client frontend never handles privileged Discord credentials.
 - **Authorization**: The `/api/sync-teams` endpoint verifies the caller's Supabase Admin JWT or an optional `BOT_API_SECRET` header.
-- **Fault-Tolerant & Idempotent**: Failed Discord synchronizations do not affect or wipe saved teams on the website. Re-spinning or re-running synchronization is idempotent and cleans up obsolete team roles without touching community or moderator roles.
+- **Private team voice channels**: Every synchronized team receives a `team-N` voice channel. The `@everyone` role is denied channel visibility and connection; only that team's role is allowed to view, connect, and speak. Discord administrators retain access through Discord's administrator permission bypass.\n- **Shared text channel access**: Every team role receives `ViewChannel` and `ReadMessageHistory` on channel `1560655328914448506`; no send permission is added.\n- **Website-only controls**: Team channels are created during the website's existing team sync flow. The website's **Delete Team Roles & Voice Channels** action removes the bot-managed voice channels and team roles. No Discord slash commands are used.\n- **Fault-Tolerant & Idempotent**: Failed Discord synchronizations do not affect or wipe saved teams on the website. Re-spinning or re-running synchronization is idempotent and cleans up only tracked bot-managed channels and roles.
 
 ---
 
@@ -173,5 +173,5 @@ cd bot && npm test
 - [x] Regenerating teams strips previous team roles and assigns new ones.
 - [x] Unrelated roles (Admin, Moderator, Community) are never touched.
 - [x] Unmatched players are reported gracefully without crashing.
-- [x] Idempotent operations across multiple sync runs.
+- [x] Idempotent operations across multiple sync runs.\n- [x] Private voice channel per team with role-based visibility and connection access.\n- [x] Team roles can view and read the shared text channel.\n- [x] Website cleanup removes tracked team voice channels along with team roles.
 - [x] Bot failure leaves website and database teams intact.
