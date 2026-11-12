@@ -49,8 +49,8 @@ This service automatically synchronizes Apex Custom Lobby teams generated on the
    - Under **Scopes**, select: `bot`.
    - Under **Bot Permissions**, select:
      - `Manage Roles` *(Mandatory: to create and assign Team roles)*
-     - `View Channels`
-     - `Send Messages`
+     - `Manage Channels` *(Mandatory: to create/delete private voice channels and edit channel permissions)*
+     - `View Channels` *(The bot must be able to see the shared text channel)*
 5. Copy the generated URL and open it in your browser to invite the bot to your Discord server.
 
 > **CRITICAL ROLE HIERARCHY NOTE**:
