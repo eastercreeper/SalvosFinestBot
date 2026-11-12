@@ -477,6 +477,72 @@ async function authenticateRequest(req, res, next) {
    HEALTH CHECK
 ========================================================= */
 
+/* =========================================================
+   PUBLIC REGISTRATION DISCORD MEMBERSHIP CHECK
+========================================================= */
+
+// This endpoint is intentionally public: new registrants do not have
+// an admin session. It is rate-limited and only checks membership.
+app.post(
+    "/api/discord/verify-member",
+    rateLimit,
+    async (req, res) => {
+        const discordId = String(req.body?.discord_id || "").trim();
+
+        if (!/^\\d{17,20}$/.test(discordId)) {
+            return res.status(400).json({
+                success: false,
+                valid: false,
+                error: "Enter a valid Discord user ID."
+            });
+        }
+
+        if (!client.isReady()) {
+            return res.status(503).json({
+                success: false,
+                valid: false,
+                error: "Discord verification is temporarily unavailable. Please try again."
+            });
+        }
+
+        try {
+            const guild = await client.guilds.fetch(DISCORD_GUILD_ID);
+
+            if (!guild) {
+                return res.status(503).json({
+                    success: false,
+                    valid: false,
+                    error: "The Discord server could not be reached. Please try again later."
+                });
+            }
+
+            try {
+                await guild.members.fetch({ user: discordId, force: true });
+                return res.json({ success: true, valid: true });
+            } catch (memberError) {
+                // Discord returns an unknown-member error when the account
+                // is not in this guild; do not treat API/network failures as absence.
+                if (memberError?.code === 10007 || memberError?.code === 10013) {
+                    return res.json({
+                        success: true,
+                        valid: false,
+                        error: "Invalid Discord ID or you are not a member of the Salvo's Finest Discord server."
+                    });
+                }
+
+                throw memberError;
+            }
+        } catch (error) {
+            console.error("[Registration] Discord membership check failed:", error.message);
+            return res.status(503).json({
+                success: false,
+                valid: false,
+                error: "Unable to verify Discord membership right now. Please try again."
+            });
+        }
+    }
+);
+
 app.get("/api/health", (req, res) => {
     const discordReady =
         client.isReady();
