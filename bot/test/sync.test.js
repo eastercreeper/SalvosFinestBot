@@ -6,12 +6,13 @@ const {
     ensureTeamRoles,
     matchMember,
     syncTeamsWithDiscord,
-    clearAllTeamRoles
+    clearAllTeamRoles,
+    deleteAllTrackedTeamRoles
 } = require("../sync");
 
 // Mock Discord.js Objects for testing
 function createMockRole(id, name) {
-    return { id, name };
+    return { id, name, delete: async () => {} };
 }
 
 function createMockMember({ id, username, tag, globalName, nickname, displayName, roles = [], bot = false }) {
@@ -38,24 +39,68 @@ function createMockMember({ id, username, tag, globalName, nickname, displayName
     return member;
 }
 
+let guildIdCounter = 0;
+
 function createMockGuild(roles = [], members = []) {
     const roleCache = new Map(roles.map(r => [r.id, r]));
     const memberMap = new Map(members.map(m => [m.id, m]));
+    const voiceChannels = new Map();
+    const permissionEdits = [];
+    const guildId = `guild_test_${++guildIdCounter}`;
     let roleIdCounter = 1000;
+    let channelIdCounter = 2000;
+
+    for (const role of roleCache.values()) {
+        role.delete = async () => roleCache.delete(role.id);
+    }
+
+    const sharedTextChannel = {
+        id: "1560655328914448506",
+        isTextBased: () => true,
+        permissionOverwrites: {
+            edit: async (id, permissions) => permissionEdits.push({ channel: "shared", id, permissions })
+        }
+    };
 
     return {
+        id: guildId,
+        voiceChannels,
+        permissionEdits,
         roles: {
             cache: roleCache,
             fetch: async () => roleCache,
-            create: async ({ name, mentionable, reason }) => {
+            create: async ({ name }) => {
                 const id = `role_${++roleIdCounter}`;
                 const newRole = createMockRole(id, name);
+                newRole.delete = async () => roleCache.delete(id);
                 roleCache.set(id, newRole);
                 return newRole;
             }
         },
         members: {
             fetch: async () => memberMap
+        },
+        channels: {
+            fetch: async id => {
+                if (id === "1560655328914448506") return sharedTextChannel;
+                const channel = voiceChannels.get(id);
+                if (!channel) throw new Error("Unknown channel");
+                return channel;
+            },
+            create: async options => {
+                const id = `voice_${++channelIdCounter}`;
+                const channel = {
+                    id,
+                    name: options.name,
+                    type: 2,
+                    permissionOverwrites: {
+                        edit: async (targetId, permissions) => permissionEdits.push({ channel: id, id: targetId, permissions })
+                    },
+                    delete: async () => voiceChannels.delete(id)
+                };
+                voiceChannels.set(id, channel);
+                return channel;
+            }
         }
     };
 }
@@ -169,6 +214,10 @@ describe("Discord Role Synchronizer Unit Tests", () => {
 
             assert.strictEqual(result.success, true);
             assert.strictEqual(result.totalTeams, 2);
+            assert.deepStrictEqual(result.voiceChannelsCreated, ["team-1", "team-2"]);
+            assert.strictEqual(result.sharedChannelConfigured, true);
+            assert.strictEqual(guild.voiceChannels.size, 2);
+            assert.strictEqual(guild.permissionEdits.filter(edit => edit.channel === "shared").length, 2);
             assert.strictEqual(result.matchedCount, 3);
             assert.strictEqual(result.unmatchedCount, 1);
             assert.strictEqual(result.unmatchedPlayers[0].apex_name, "Apex3");
@@ -187,10 +236,31 @@ describe("Discord Role Synchronizer Unit Tests", () => {
             // Re-running idempotently:
             const reRunResult = await syncTeamsWithDiscord(guild, teams);
             assert.strictEqual(reRunResult.success, true);
+            assert.deepStrictEqual(reRunResult.voiceChannelsCreated, []);
+            assert.deepStrictEqual(reRunResult.voiceChannelsReused, ["team-1", "team-2"]);
+            assert.strictEqual(guild.voiceChannels.size, 2);
             assert.strictEqual(reRunResult.matchedCount, 3);
             assert.ok(member1.roles.cache.has("role_admin"));
             assert.ok(member1.roles.cache.has("role_t2"));
             assert.ok(!member1.roles.cache.has("role_t1"));
+        });
+    });
+
+    describe("deleteAllTrackedTeamRoles", () => {
+        it("deletes bot-managed team voice channels along with their roles", async () => {
+            const guild = createMockGuild([], []);
+            await syncTeamsWithDiscord(guild, [
+                [{ apex_name: "Player One", discord_name: "missing_one" }],
+                [{ apex_name: "Player Two", discord_name: "missing_two" }]
+            ]);
+
+            const result = await deleteAllTrackedTeamRoles(guild);
+
+            assert.strictEqual(result.success, true);
+            assert.strictEqual(result.deletedCount, 2);
+            assert.strictEqual(result.deletedVoiceChannelCount, 2);
+            assert.strictEqual(guild.voiceChannels.size, 0);
+            assert.strictEqual(guild.roles.cache.size, 0);
         });
     });
 

@@ -31,6 +31,132 @@ const ROLE_REGISTRY_PATH = path.join(
     "team-role-registry.json"
 );
 
+// Voice channels are tracked separately so cleanup never touches channels
+// that were not created and registered by this bot.
+const VOICE_CHANNEL_REGISTRY_PATH = path.join(__dirname, "team-voice-channel-registry.json");
+const SHARED_TEAM_TEXT_CHANNEL_ID = "1560655328914448506";
+
+function readVoiceChannelRegistry() {
+    try {
+        return JSON.parse(fs.readFileSync(VOICE_CHANNEL_REGISTRY_PATH, "utf8"));
+    } catch (error) {
+        if (error.code === "ENOENT") return {};
+        throw error;
+    }
+}
+
+function writeVoiceChannelRegistry(registry) {
+    fs.writeFileSync(VOICE_CHANNEL_REGISTRY_PATH, JSON.stringify(registry, null, 2), { mode: 0o600 });
+}
+
+function registerTeamVoiceChannel(guild, roleId, channelId) {
+    const registry = readVoiceChannelRegistry();
+    if (!registry[guild.id] || typeof registry[guild.id] !== "object") registry[guild.id] = {};
+    registry[guild.id][roleId] = channelId;
+    writeVoiceChannelRegistry(registry);
+}
+
+function unregisterTeamVoiceChannel(guild, roleId) {
+    const registry = readVoiceChannelRegistry();
+    if (!registry[guild.id]) return;
+    delete registry[guild.id][roleId];
+    writeVoiceChannelRegistry(registry);
+}
+
+async function ensureTeamVoiceChannels(guild, roleMap) {
+    if (!guild.channels) throw new Error("Discord channel manager is unavailable.");
+
+    const registry = readVoiceChannelRegistry();
+    if (!registry[guild.id] || typeof registry[guild.id] !== "object") registry[guild.id] = {};
+
+    const created = [];
+    const reused = [];
+    const errors = [];
+    let sharedChannel = null;
+    let sharedAccessGrantedCount = 0;
+
+    try {
+        sharedChannel = await guild.channels.fetch(SHARED_TEAM_TEXT_CHANNEL_ID);
+        if (!sharedChannel || !sharedChannel.isTextBased?.() || !sharedChannel.permissionOverwrites) {
+            throw new Error(`Configured shared channel ${SHARED_TEAM_TEXT_CHANNEL_ID} is not a text channel.`);
+        }
+    } catch (error) {
+        errors.push(`Could not configure shared team channel: ${error.message}`);
+    }
+
+    for (const [teamNumber, role] of roleMap) {
+        if (sharedChannel) {
+            try {
+                await sharedChannel.permissionOverwrites.edit(role.id, {
+                    ViewChannel: true,
+                    ReadMessageHistory: true
+                }, { reason: `Allow ${role.name} to view the shared team channel` });
+                sharedAccessGrantedCount++;
+            } catch (error) {
+                errors.push(`Failed to grant ${role.name} read access to the shared channel: ${error.message}`);
+            }
+        }
+
+        try {
+            let voiceChannel = null;
+            const trackedChannelId = registry[guild.id][role.id];
+            if (trackedChannelId) {
+                try { voiceChannel = await guild.channels.fetch(trackedChannelId); }
+                catch { voiceChannel = null; }
+            }
+
+            if (voiceChannel && voiceChannel.type !== 2) {
+                errors.push(`Tracked channel for ${role.name} is not a voice channel; it was not modified.`);
+                continue;
+            }
+
+            if (!voiceChannel) {
+                voiceChannel = await guild.channels.create({
+                    name: `team-${teamNumber}`,
+                    type: 2,
+                    permissionOverwrites: [
+                        { id: guild.id, deny: ["ViewChannel", "Connect"] },
+                        { id: role.id, allow: ["ViewChannel", "Connect", "Speak"] }
+                    ],
+                    reason: `Private voice channel for ${role.name}`
+                });
+                registerTeamVoiceChannel(guild, role.id, voiceChannel.id);
+                registry[guild.id][role.id] = voiceChannel.id;
+                created.push(voiceChannel.name);
+            } else {
+                // Remove stale role/member overwrites so only this team role
+                // can access the channel (administrators bypass overwrites).
+                for (const [overwriteId] of voiceChannel.permissionOverwrites.cache || []) {
+                    if (overwriteId !== guild.id && overwriteId !== role.id) {
+                        await voiceChannel.permissionOverwrites.delete(
+                            overwriteId,
+                            "Keep team voice channel exclusive to its team role"
+                        );
+                    }
+                }
+
+                await voiceChannel.permissionOverwrites.edit(role.id, {
+                    ViewChannel: true, Connect: true, Speak: true
+                }, { reason: `Ensure private access for ${role.name}` });
+                await voiceChannel.permissionOverwrites.edit(guild.id, {
+                    ViewChannel: false, Connect: false
+                }, { reason: "Keep team voice channel private" });
+                reused.push(voiceChannel.name);
+            }
+        } catch (error) {
+            errors.push(`Failed to configure ${role.name} voice channel: ${error.message}`);
+        }
+    }
+
+    return {
+        created,
+        reused,
+        sharedChannelConfigured: Boolean(sharedChannel) && sharedAccessGrantedCount === roleMap.size,
+        sharedAccessGrantedCount,
+        errors
+    };
+}
+
 function getExistingTeamRoles(guild) {
     const teamRoleMap = new Map();
     const teamRolePattern = /^Team\s+(\d+)$/i;
@@ -308,8 +434,9 @@ async function syncTeamsWithDiscord(guild, teams) {
 
     const totalTeams = teams.length;
 
-    // Step 1: Ensure all required team roles exist
+    // Step 1: Ensure all required team roles exist.
     const { roleMap, created, reused } = await ensureTeamRoles(guild, totalTeams);
+    const channelSetup = await ensureTeamVoiceChannels(guild, roleMap);
 
     // Collect all team role IDs in the guild (both current and higher numbers if they exist)
     const allTeamRoleIds = getTrackedTeamRoleIds(guild, true);
@@ -322,7 +449,7 @@ async function syncTeamsWithDiscord(guild, teams) {
 
     const assignments = [];
     const unmatchedPlayers = [];
-    const errors = [];
+    const errors = [...channelSetup.errors];
     let matchedCount = 0;
 
     // Step 3: Iterate through each team and assign roles
@@ -397,6 +524,9 @@ async function syncTeamsWithDiscord(guild, teams) {
         totalTeams,
         rolesCreated: created,
         rolesReused: reused,
+        voiceChannelsCreated: channelSetup.created,
+        voiceChannelsReused: channelSetup.reused,
+        sharedChannelConfigured: channelSetup.sharedChannelConfigured,
         matchedCount,
         unmatchedCount: unmatchedPlayers.length,
         unmatchedPlayers,
@@ -457,66 +587,63 @@ async function clearAllTeamRoles(guild) {
  * from guild members.
  */
 async function deleteAllTrackedTeamRoles(guild) {
-    if (!guild) {
-        throw new Error("Discord guild is not available.");
-    }
+    if (!guild) throw new Error("Discord guild is not available.");
 
     await guild.roles.fetch();
-
-    // The registry contains IDs verified as bot-managed.
     const trackedRoleIds = getTrackedTeamRoleIds(guild, true);
     const members = await guild.members.fetch();
+    const voiceRegistry = readVoiceChannelRegistry();
+    const guildVoiceChannels = voiceRegistry[guild.id] || {};
 
     let deletedCount = 0;
+    let deletedVoiceChannelCount = 0;
     const errors = [];
 
     for (const roleId of trackedRoleIds) {
         const role = guild.roles.cache.get(roleId);
-
-        // Ignore IDs whose roles no longer exist.
-        if (!role) {
-            unregisterTeamRole(guild, roleId);
-            continue;
-        }
+        const voiceChannelId = guildVoiceChannels[roleId];
 
         try {
-            // Remove the role from every member who has it.
+            if (voiceChannelId) {
+                let voiceChannel = null;
+                try { voiceChannel = await guild.channels.fetch(voiceChannelId); }
+                catch { voiceChannel = null; }
+
+                if (voiceChannel) {
+                    await voiceChannel.delete("Salvo's Finest admin deleted the associated team voice channel");
+                    deletedVoiceChannelCount++;
+                }
+                unregisterTeamVoiceChannel(guild, roleId);
+            }
+
+            if (!role) {
+                unregisterTeamRole(guild, roleId);
+                continue;
+            }
+
             for (const [, member] of members) {
                 if (member.roles.cache.has(roleId)) {
-                    await member.roles.remove(
-                        roleId,
-                        "Salvo's Finest admin deleted tracked team role"
-                    );
+                    await member.roles.remove(roleId, "Salvo's Finest admin deleted tracked team role");
                 }
             }
 
-            await role.delete(
-                "Salvo's Finest admin deleted tracked team role"
-            );
-
+            await role.delete("Salvo's Finest admin deleted tracked team role");
             unregisterTeamRole(guild, roleId);
             deletedCount++;
         } catch (error) {
-            console.error(
-                `[Discord Bot] Failed to delete tracked role ${role.name} (${roleId}):`,
-                error.message
-            );
-
-            errors.push(`Failed to delete ${role.name}: ${error.message}`);
+            console.error(`[Discord Bot] Failed to delete tracked role ${role?.name || roleId}:`, error.message);
+            errors.push(`Failed to delete ${role?.name || roleId}: ${error.message}`);
         }
     }
 
-    return {
-        success: errors.length === 0,
-        deletedCount,
-        errors
-    };
+    return { success: errors.length === 0, deletedCount, deletedVoiceChannelCount, errors };
 }
 
 module.exports = {
     normalizeIdentifier,
     getExistingTeamRoles,
     ensureTeamRoles,
+    ensureTeamVoiceChannels,
     matchMember,
     syncTeamsWithDiscord,
     clearAllTeamRoles,
