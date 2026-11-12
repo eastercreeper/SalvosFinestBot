@@ -73,6 +73,7 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
     const reused = [];
     const errors = [];
     let sharedChannel = null;
+    let sharedAccessGrantedCount = 0;
 
     try {
         sharedChannel = await guild.channels.fetch(SHARED_TEAM_TEXT_CHANNEL_ID);
@@ -84,14 +85,19 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
     }
 
     for (const [teamNumber, role] of roleMap) {
-        try {
-            if (sharedChannel) {
+        if (sharedChannel) {
+            try {
                 await sharedChannel.permissionOverwrites.edit(role.id, {
                     ViewChannel: true,
                     ReadMessageHistory: true
                 }, { reason: `Allow ${role.name} to view the shared team channel` });
+                sharedAccessGrantedCount++;
+            } catch (error) {
+                errors.push(`Failed to grant ${role.name} read access to the shared channel: ${error.message}`);
             }
+        }
 
+        try {
             let voiceChannel = null;
             const trackedChannelId = registry[guild.id][role.id];
             if (trackedChannelId) {
@@ -127,13 +133,18 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
                 reused.push(voiceChannel.name);
             }
         } catch (error) {
-            errors.push(`Failed to configure ${role.name} channel access: ${error.message}`);
+            errors.push(`Failed to configure ${role.name} voice channel: ${error.message}`);
         }
     }
 
-    return { created, reused, sharedChannelConfigured: Boolean(sharedChannel), errors };
+    return {
+        created,
+        reused,
+        sharedChannelConfigured: Boolean(sharedChannel) && sharedAccessGrantedCount === roleMap.size,
+        sharedAccessGrantedCount,
+        errors
+    };
 }
-
 
 function getExistingTeamRoles(guild) {
     const teamRoleMap = new Map();
