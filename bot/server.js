@@ -489,7 +489,7 @@ app.post(
     async (req, res) => {
         const discordId = String(req.body?.discord_id || "").trim();
 
-        if (!/^\\d{17,20}$/.test(discordId)) {
+        if (!/^\d{17,20}$/.test(discordId)) {
             return res.status(400).json({
                 success: false,
                 valid: false,
