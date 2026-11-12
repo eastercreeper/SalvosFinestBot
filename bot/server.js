@@ -6,7 +6,7 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const { Client, GatewayIntentBits } = require("discord.js");
+const { Client, GatewayIntentBits, SlashCommandBuilder } = require("discord.js");
 const { createClient } = require("@supabase/supabase-js");
 
 const {
@@ -813,6 +813,77 @@ app.post(
 );
 
 /* =========================================================
+   CHECK-IN API
+========================================================= */
+
+app.get(
+    "/api/check-in/status",
+    authenticateRequest,
+    async (req, res) => {
+        if (!supabase) {
+            return res.status(503).json({ success: false, error: "Supabase is not configured." });
+        }
+
+        const { data, error } = await supabase
+            .from("lobby_state")
+            .select("check_in_enabled")
+            .eq("id", 1)
+            .maybeSingle();
+
+        if (error || !data) {
+            console.error("[Check-in] Status query failed:", error?.message);
+            return res.status(500).json({ success: false, error: "Unable to load check-in status." });
+        }
+
+        return res.json({ success: true, enabled: data.check_in_enabled === true });
+    }
+);
+
+app.post(
+    "/api/check-in/toggle",
+    authenticateRequest,
+    rateLimit,
+    async (req, res) => {
+        if (!supabase) {
+            return res.status(503).json({ success: false, error: "Supabase is not configured." });
+        }
+
+        if (typeof req.body?.enabled !== "boolean") {
+            return res.status(400).json({ success: false, error: "enabled must be true or false." });
+        }
+
+        try {
+            // Start each newly opened check-in window with a clean attendance list.
+            if (req.body.enabled) {
+                const { error: resetError } = await supabase
+                    .from("players")
+                    .update({ present: false });
+
+                if (resetError) throw resetError;
+            }
+
+            const { data, error } = await supabase
+                .from("lobby_state")
+                .update({
+                    check_in_enabled: req.body.enabled,
+                    updated_at: new Date().toISOString()
+                })
+                .eq("id", 1)
+                .select("check_in_enabled")
+                .maybeSingle();
+
+            if (error || !data) throw error || new Error("Lobby state row was not found.");
+
+            console.log(`[Check-in] ${req.authIdentity} ${data.check_in_enabled ? "enabled" : "disabled"} Apex check-in.`);
+            return res.json({ success: true, enabled: data.check_in_enabled === true });
+        } catch (error) {
+            console.error("[Check-in] Toggle failed:", error.message);
+            return res.status(500).json({ success: false, error: "Unable to update check-in status." });
+        }
+    }
+);
+
+/* =========================================================
    DISCORD EVENTS
 ========================================================= */
 
@@ -829,10 +900,20 @@ client.once("ready", () => {
         return;
     }
 
-    const guild =
-        client.guilds.cache.get(DISCORD_GUILD_ID);
+    const guild = client.guilds.cache.get(DISCORD_GUILD_ID);
 
     if (guild) {
+        client.application.commands.set([
+            new SlashCommandBuilder()
+                .setName("check-in")
+                .setDescription("Mark yourself as present for the Apex custom game.")
+                .toJSON()
+        ], DISCORD_GUILD_ID).then(() => {
+            console.log("[Discord Bot] Registered /check-in command.");
+        }).catch(error => {
+            console.error("[Discord Bot] Slash command registration failed:", error.message);
+        });
+
         console.log(
             `[Discord Bot] Target Guild: "${guild.name}" (${guild.id}) - ${guild.memberCount} members`
         );
@@ -840,6 +921,70 @@ client.once("ready", () => {
         console.warn(
             "[Discord Bot] Target guild was not found."
         );
+    }
+});
+
+client.on("interactionCreate", async interaction => {
+    if (!interaction.isChatInputCommand() || interaction.commandName !== "check-in") return;
+
+    try {
+        if (!supabase) {
+            return interaction.reply({ content: "Check-in is temporarily unavailable. Please contact an admin.", ephemeral: true });
+        }
+
+        const { data: lobby, error: lobbyError } = await supabase
+            .from("lobby_state")
+            .select("check_in_enabled")
+            .eq("id", 1)
+            .maybeSingle();
+
+        if (lobbyError || !lobby) {
+            console.error("[Check-in] Could not read check-in state:", lobbyError?.message);
+            return interaction.reply({ content: "I couldn't verify whether check-in is open. Please try again later.", ephemeral: true });
+        }
+
+        if (lobby.check_in_enabled !== true) {
+            return interaction.reply({ content: "Apex custom-game check-in is currently closed.", ephemeral: true });
+        }
+
+        // The players.discord_name field stores the Discord user ID.
+        const { data: player, error: playerError } = await supabase
+            .from("players")
+            .select("id, apex_name, present")
+            .eq("discord_name", interaction.user.id)
+            .maybeSingle();
+
+        if (playerError) {
+            console.error("[Check-in] Player lookup failed:", playerError.message);
+            return interaction.reply({ content: "I couldn't look up your registration. Please contact an admin.", ephemeral: true });
+        }
+
+        if (!player) {
+            return interaction.reply({ content: "I couldn't find a registration linked to your Discord account. Make sure you registered with your Discord ID.", ephemeral: true });
+        }
+
+        if (player.present === true) {
+            return interaction.reply({ content: `You're already checked in, ${player.apex_name}!`, ephemeral: true });
+        }
+
+        const { error: updateError } = await supabase
+            .from("players")
+            .update({ present: true })
+            .eq("id", player.id);
+
+        if (updateError) {
+            console.error("[Check-in] Attendance update failed:", updateError.message);
+            return interaction.reply({ content: "Your check-in couldn't be saved. Please try again.", ephemeral: true });
+        }
+
+        console.log(`[Check-in] ${interaction.user.tag} (${interaction.user.id}) checked in as ${player.apex_name}.`);
+        return interaction.reply({ content: `You're checked in, ${player.apex_name}! Have a good game.`, ephemeral: true });
+    } catch (error) {
+        console.error("[Check-in] Command failed:", error.message);
+        if (interaction.replied || interaction.deferred) {
+            return interaction.followUp({ content: "Something went wrong while checking you in. Please contact an admin.", ephemeral: true });
+        }
+        return interaction.reply({ content: "Something went wrong while checking you in. Please contact an admin.", ephemeral: true });
     }
 });
 
