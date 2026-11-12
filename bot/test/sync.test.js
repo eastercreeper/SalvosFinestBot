@@ -78,10 +78,18 @@ function createMockGuild(roles = [], members = []) {
             }
         },
         members: {
-            fetch: async () => memberMap
+            fetch: async id => id ? memberMap.get(id) : memberMap,
+            search: async ({ query }) => new Map(
+                [...memberMap].filter(([, member]) =>
+                    member.user.username.toLowerCase().includes(query.toLowerCase()) ||
+                    (member.nickname || "").toLowerCase().includes(query.toLowerCase()) ||
+                    (member.user.globalName || "").toLowerCase().includes(query.toLowerCase())
+                )
+            )
         },
         channels: {
             fetch: async id => {
+                if (id === "1560654064885436486") return { id, type: 4, name: "Team Voice Category" };
                 if (id === "1560655328914448506") return sharedTextChannel;
                 const channel = voiceChannels.get(id);
                 if (!channel) throw new Error("Unknown channel");
@@ -93,9 +101,13 @@ function createMockGuild(roles = [], members = []) {
                     id,
                     name: options.name,
                     type: 2,
+                    parentId: options.parent,
                     permissionOverwrites: {
-                        edit: async (targetId, permissions) => permissionEdits.push({ channel: id, id: targetId, permissions })
+                        cache: new Map(),
+                        edit: async (targetId, permissions) => permissionEdits.push({ channel: id, id: targetId, permissions }),
+                        delete: async targetId => permissionEdits.push({ channel: id, deleted: targetId })
                     },
+                    setParent: async parentId => { channel.parentId = parentId; return channel; },
                     delete: async () => voiceChannels.delete(id)
                 };
                 voiceChannels.set(id, channel);
