@@ -124,6 +124,17 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
                 registry[guild.id][role.id] = voiceChannel.id;
                 created.push(voiceChannel.name);
             } else {
+                // Remove stale role/member overwrites so only this team role
+                // can access the channel (administrators bypass overwrites).
+                for (const [overwriteId] of voiceChannel.permissionOverwrites.cache || []) {
+                    if (overwriteId !== guild.id && overwriteId !== role.id) {
+                        await voiceChannel.permissionOverwrites.delete(
+                            overwriteId,
+                            "Keep team voice channel exclusive to its team role"
+                        );
+                    }
+                }
+
                 await voiceChannel.permissionOverwrites.edit(role.id, {
                     ViewChannel: true, Connect: true, Speak: true
                 }, { reason: `Ensure private access for ${role.name}` });
