@@ -236,6 +236,9 @@ describe("Discord Role Synchronizer Unit Tests", () => {
             // Re-running idempotently:
             const reRunResult = await syncTeamsWithDiscord(guild, teams);
             assert.strictEqual(reRunResult.success, true);
+            assert.deepStrictEqual(reRunResult.voiceChannelsCreated, []);
+            assert.deepStrictEqual(reRunResult.voiceChannelsReused, ["team-1", "team-2"]);
+            assert.strictEqual(guild.voiceChannels.size, 2);
             assert.strictEqual(reRunResult.matchedCount, 3);
             assert.ok(member1.roles.cache.has("role_admin"));
             assert.ok(member1.roles.cache.has("role_t2"));
