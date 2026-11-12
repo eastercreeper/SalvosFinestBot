@@ -1038,7 +1038,7 @@ client.on("interactionCreate", async interaction => {
             const usernameLookup = await supabase
                 .from("players")
                 .select("id, apex_name, present")
-                .ilike("discord_name", interaction.user.username)
+                .eq("discord_name", interaction.user.username)
                 .maybeSingle();
 
             player = usernameLookup.data;
