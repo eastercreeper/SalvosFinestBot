@@ -46,7 +46,7 @@ function readVoiceChannelRegistry() {
 }
 
 function writeVoiceChannelRegistry(registry) {
-    fs.writeFileSync(VOICE_CHANNEL_REGISTRY_PATH, JSON.stringify(registry, null, 2), { mode: "0o600" });
+    fs.writeFileSync(VOICE_CHANNEL_REGISTRY_PATH, JSON.stringify(registry, null, 2), { mode: 0o600 });
 }
 
 function registerTeamVoiceChannel(guild, roleId, channelId) {
