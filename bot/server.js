@@ -482,18 +482,22 @@ async function authenticateRequest(req, res, next) {
 ========================================================= */
 
 // This endpoint is intentionally public: new registrants do not have
-// an admin session. It is rate-limited and only checks membership.
+// an admin session. It is rate-limited and matches the actual Discord
+// username, never a server nickname or display name.
 app.post(
     "/api/discord/verify-member",
     rateLimit,
     async (req, res) => {
-        const discordId = String(req.body?.discord_id || "").trim();
+        const discordUsername = String(req.body?.discord_username || "")
+            .trim()
+            .replace(/^@/, "")
+            .toLowerCase();
 
-        if (!/^\d{17,20}$/.test(discordId)) {
+        if (!/^[a-z0-9._]{2,32}$/.test(discordUsername)) {
             return res.status(400).json({
                 success: false,
                 valid: false,
-                error: "Enter a valid Discord user ID."
+                error: "Enter a valid Discord username (not your server nickname)."
             });
         }
 
@@ -516,24 +520,32 @@ app.post(
                 });
             }
 
-            try {
-                await guild.members.fetch({ user: discordId, force: true });
-                return res.json({ success: true, valid: true });
-            } catch (memberError) {
-                // Discord returns an unknown-member error when the account
-                // is not in this guild; do not treat API/network failures as absence.
-                if (memberError?.code === 10007 || memberError?.code === 10013) {
-                    return res.json({
-                        success: true,
-                        valid: false,
-                        error: "Invalid Discord ID or you are not a member of the Salvo's Finest Discord server."
-                    });
-                }
+            // Discord's member search can return matches on nicknames and
+            // display names too, so explicitly filter by user.username.
+            const matches = await guild.members.search({
+                query: discordUsername,
+                limit: 10
+            });
 
-                throw memberError;
+            const member = matches.find(
+                candidate => candidate.user.username.toLowerCase() === discordUsername
+            );
+
+            if (!member) {
+                return res.json({
+                    success: true,
+                    valid: false,
+                    error: "That Discord username was not found in the Salvo's Finest server. Check your username and try again."
+                });
             }
+
+            return res.json({
+                success: true,
+                valid: true,
+                username: member.user.username
+            });
         } catch (error) {
-            console.error("[Registration] Discord membership check failed:", error.message);
+            console.error("[Registration] Discord username verification failed:", error.message);
             return res.status(503).json({
                 success: false,
                 valid: false,
@@ -1013,12 +1025,25 @@ client.on("interactionCreate", async interaction => {
             return interaction.reply({ content: "Apex custom-game check-in is currently closed.", ephemeral: true });
         }
 
-        // The players.discord_name field stores the Discord user ID.
-        const { data: player, error: playerError } = await supabase
+        // New registrations store the actual Discord username. Also check the
+        // user ID first so existing registrations made before this change
+        // continue to work.
+        let { data: player, error: playerError } = await supabase
             .from("players")
             .select("id, apex_name, present")
             .eq("discord_name", interaction.user.id)
             .maybeSingle();
+
+        if (!player && !playerError) {
+            const usernameLookup = await supabase
+                .from("players")
+                .select("id, apex_name, present")
+                .ilike("discord_name", interaction.user.username)
+                .maybeSingle();
+
+            player = usernameLookup.data;
+            playerError = usernameLookup.error;
+        }
 
         if (playerError) {
             console.error("[Check-in] Player lookup failed:", playerError.message);
@@ -1026,7 +1051,7 @@ client.on("interactionCreate", async interaction => {
         }
 
         if (!player) {
-            return interaction.reply({ content: "I couldn't find a registration linked to your Discord account. Make sure you registered with your Discord ID.", ephemeral: true });
+            return interaction.reply({ content: "I couldn't find a registration linked to your Discord username. Make sure you registered with your exact Discord username.", ephemeral: true });
         }
 
         if (player.present === true) {
