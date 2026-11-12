@@ -35,6 +35,7 @@ const ROLE_REGISTRY_PATH = path.join(
 // that were not created and registered by this bot.
 const VOICE_CHANNEL_REGISTRY_PATH = path.join(__dirname, "team-voice-channel-registry.json");
 const SHARED_TEAM_TEXT_CHANNEL_ID = "1560655328914448506";
+const TEAM_VOICE_CATEGORY_ID = "1560654064885436486";
 
 function readVoiceChannelRegistry() {
     try {
@@ -74,6 +75,16 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
     const errors = [];
     let sharedChannel = null;
     let sharedAccessGrantedCount = 0;
+    let voiceCategory = null;
+
+    try {
+        voiceCategory = await guild.channels.fetch(TEAM_VOICE_CATEGORY_ID);
+        if (!voiceCategory || voiceCategory.type !== 4) {
+            throw new Error(`Configured voice parent ${TEAM_VOICE_CATEGORY_ID} is not a Discord category.`);
+        }
+    } catch (error) {
+        errors.push(`Could not configure team voice category: ${error.message}`);
+    }
 
     try {
         sharedChannel = await guild.channels.fetch(SHARED_TEAM_TEXT_CHANNEL_ID);
@@ -98,6 +109,7 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
         }
 
         try {
+            if (!voiceCategory) continue;
             let voiceChannel = null;
             const trackedChannelId = registry[guild.id][role.id];
             if (trackedChannelId) {
@@ -114,6 +126,7 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
                 voiceChannel = await guild.channels.create({
                     name: `team-${teamNumber}`,
                     type: 2,
+                    parent: TEAM_VOICE_CATEGORY_ID,
                     permissionOverwrites: [
                         { id: guild.id, deny: ["ViewChannel", "Connect"] },
                         { id: role.id, allow: ["ViewChannel", "Connect", "Speak"] }
@@ -124,6 +137,13 @@ async function ensureTeamVoiceChannels(guild, roleMap) {
                 registry[guild.id][role.id] = voiceChannel.id;
                 created.push(voiceChannel.name);
             } else {
+                if (voiceChannel.parentId !== TEAM_VOICE_CATEGORY_ID) {
+                    await voiceChannel.setParent(TEAM_VOICE_CATEGORY_ID, {
+                        lockPermissions: false,
+                        reason: "Move tracked team voice channel into the configured category"
+                    });
+                }
+
                 // Remove stale role/member overwrites so only this team role
                 // can access the channel (administrators bypass overwrites).
                 for (const [overwriteId] of voiceChannel.permissionOverwrites.cache || []) {
@@ -444,8 +464,23 @@ async function syncTeamsWithDiscord(guild, teams) {
         allTeamRoleIds.add(role.id);
     }
 
-    // Step 2: Fetch all guild members
-    const members = await guild.members.fetch();
+    // Resolve players individually instead of requesting the entire guild member
+    // list through Gateway opcode 8, which is rate-limited on larger servers.
+    async function findGuildMember(player) {
+        const discordId = player.discord_id ? String(player.discord_id).trim() : "";
+        if (discordId) {
+            try {
+                return await guild.members.fetch(discordId);
+            } catch (error) {
+                if (!player.discord_name) return null;
+            }
+        }
+
+        const discordName = player.discord_name ? String(player.discord_name).trim() : "";
+        if (!discordName) return null;
+        const candidates = await guild.members.search({ query: discordName.replace(/^@+/, ""), limit: 100 });
+        return matchMember(candidates, player).member;
+    }
 
     const assignments = [];
     const unmatchedPlayers = [];
@@ -460,18 +495,17 @@ async function syncTeamsWithDiscord(guild, teams) {
 
         for (const player of teamPlayers) {
             try {
-                const matchResult = matchMember(members, player);
+                const member = await findGuildMember(player);
 
-                if (!matchResult.member) {
+                if (!member) {
                     unmatchedPlayers.push({
                         apex_name: player.apex_name || "Unknown",
                         discord_name: player.discord_name || "N/A",
-                        reason: matchResult.ambiguityReason || "Member not found in Discord server"
+                        reason: "No unique Discord member matched the supplied ID or username/display name"
                     });
                     continue;
                 }
 
-                const member = matchResult.member;
                 matchedCount++;
 
                 // Determine existing team roles to remove
